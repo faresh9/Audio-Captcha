@@ -1,8 +1,80 @@
 import React, { useEffect, useCallback } from 'react';
 import * as Tone from 'tone';
 import { Play, Loader2, Check, X } from 'lucide-react';
-import { useCaptchaStore } from '../store/captchaStore';
-import { validateRhythm } from '../utils/rhythmValidator';
+import { create } from 'zustand';
+
+interface Tap {
+  timestamp: number;
+  interval: number | null;
+}
+
+interface CaptchaState {
+  isPlaying: boolean;
+  taps: Tap[];
+  pattern: number[];
+  isVerifying: boolean;
+  isPassed: boolean | null;
+  setIsPlaying: (isPlaying: boolean) => void;
+  addTap: (tap: Tap) => void;
+  setPattern: (pattern: number[]) => void;
+  reset: () => void;
+  setVerifying: (isVerifying: boolean) => void;
+  setPassed: (isPassed: boolean) => void;
+}
+
+export const useCaptchaStore = create<CaptchaState>((set) => ({
+  isPlaying: false,
+  taps: [],
+  pattern: [],
+  isVerifying: false,
+  isPassed: null,
+  setIsPlaying: (isPlaying) => set({ isPlaying }),
+  addTap: (tap) => set((state) => ({ taps: [...state.taps, tap] })),
+  setPattern: (pattern) => set({ pattern }),
+  reset: () => set({ taps: [], isPlaying: false, isPassed: null, isVerifying: false }),
+  setVerifying: (isVerifying) => set({ isVerifying }),
+  setPassed: (isPassed) => set({ isPassed }),
+}));
+
+export const validateRhythm = (
+  userTaps: { timestamp: number; interval: number | null }[],
+  pattern: number[]
+): boolean => {
+  if (userTaps.length < pattern.length) return false;
+
+  // Calculate intervals between taps
+  const userIntervals = userTaps
+    .slice(1)
+    .map((tap, i) => tap.timestamp - userTaps[i].timestamp);
+
+  // Normalize intervals to account for tempo differences
+  const normalizedUserIntervals = normalizeIntervals(userIntervals);
+  const normalizedPattern = normalizeIntervals(pattern);
+
+  // Compare patterns with tolerance
+  const tolerance = 0.2; // 20% tolerance for human variation
+  const isValid = normalizedUserIntervals.every((interval, i) => {
+    const target = normalizedPattern[i];
+    return Math.abs(interval - target) <= tolerance;
+  });
+
+  // Check for too-perfect timing (bot detection)
+  const variance = calculateVariance(userIntervals);
+  const isTooPerfect = variance < 0.001; // Threshold for detecting mechanical precision
+
+  return isValid && !isTooPerfect;
+};
+
+const normalizeIntervals = (intervals: number[]): number[] => {
+  const sum = intervals.reduce((a, b) => a + b, 0);
+  return intervals.map((interval) => interval / sum);
+};
+
+const calculateVariance = (intervals: number[]): number => {
+  const mean = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+  const squaredDiffs = intervals.map((x) => Math.pow(x - mean, 2));
+  return squaredDiffs.reduce((a, b) => a + b, 0) / intervals.length;
+};
 
 const RhythmCaptcha: React.FC = () => {
   const {
@@ -20,14 +92,25 @@ const RhythmCaptcha: React.FC = () => {
   } = useCaptchaStore();
 
   const generatePattern = useCallback(() => {
-    // Generate a random rhythm pattern (intervals in milliseconds)
-    const baseIntervals = [400, 600, 400, 600];
-    const randomVariation = () => (Math.random() - 0.5) * 100;
-    return baseIntervals.map(interval => interval + randomVariation());
+    const baseIntervals = [400, 600, 800, 1000];
+    const randomVariation = () => (Math.random() - 0.5) * 200;
+    const patternLength = Math.floor(Math.random() * 4) + 3;
+    return Array.from({ length: patternLength }, () => {
+      const interval = baseIntervals[Math.floor(Math.random() * baseIntervals.length)];
+      return interval + randomVariation();
+    });
+  }, []);
+
+  const playBackgroundNoise = useCallback(() => {
+    const noise = new Tone.Noise('brown').start();
+    noise.connect(Tone.getDestination());
+    noise.volume.value = -20; // Adjust volume as needed
+    return noise;
   }, []);
 
   const playPattern = useCallback(async () => {
     await Tone.start();
+    const noise = playBackgroundNoise(); // Start background noise
     const synth = new Tone.Synth().toDestination();
     const newPattern = generatePattern();
     setPattern(newPattern);
@@ -44,8 +127,9 @@ const RhythmCaptcha: React.FC = () => {
       setIsPlaying(false);
       Tone.Transport.stop();
       Tone.Transport.cancel();
+      noise.dispose(); // Stop the background noise
     }, newPattern.reduce((a, b) => a + b, 0) + 1000);
-  }, [generatePattern, setIsPlaying, setPattern]);
+  }, [generatePattern, setIsPlaying, setPattern, playBackgroundNoise]);
 
   const handleTap = useCallback(() => {
     if (!isPlaying || isVerifying) return;
@@ -85,7 +169,7 @@ const RhythmCaptcha: React.FC = () => {
   }, [handleTap]);
 
   return (
-    <div className="w-full max-w-md mx-auto p-6 bg-white rounded-xl shadow-lg">
+    <div className="w-full max-w-md mx-auto p-6 bg-blue-100 rounded-xl shadow-lg">
       <div className="text-center mb-6">
         <h2 className="text-2xl font-bold text-gray-800 mb-2">Rhythm Verification</h2>
         <p className="text-gray-600">Tap along with the rhythm to verify you're human</p>
